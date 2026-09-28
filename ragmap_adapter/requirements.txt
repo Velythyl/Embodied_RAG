@@ -1,0 +1,15 @@
+# Only what the offline forest builder imports (generate_semantic_forest.py,
+# embodied_nav/{spatial_relationship_extractor,llm,config}.py). Not airsim,
+# torch, langchain or chromadb: those serve the simulator, the explorer and the
+# query side, none of which the build touches.
+#
+# Pinned to releases contemporary with the upstream code (Nov 2024), within
+# upstream requirements.txt's ranges. httpx < 0.28 because openai 1.54 passes
+# the `proxies` argument 0.28 removed.
+networkx==3.4.2
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.5.2
+openai==1.54.4
+httpx==0.27.2
+tqdm==4.67.1

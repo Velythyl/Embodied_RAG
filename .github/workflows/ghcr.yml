@@ -1,0 +1,115 @@
+name: Publish Embodied-RAG image
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/velythyl/embodied_rag
+
+jobs:
+  docker-amd64:
+    runs-on: ubuntu-22.04
+    outputs:
+      sha_tag: ${{ steps.sha.outputs.tag }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Short SHA tag
+        id: sha
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            EMBODIED_RAG_GIT_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=embodied-rag-amd64
+          cache-to: type=gha,mode=max,scope=embodied-rag-amd64,ignore-error=true
+
+  # End-to-end run of the published image on a synthetic 12-object scene, with a
+  # stub OpenAI server standing in for the VLM (the container uses --network host,
+  # as it does under RAGMAP).
+  smoke:
+    needs: docker-amd64
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Smoke test
+        run: |
+          set -eux
+          image="$IMAGE:${{ needs.docker-amd64.outputs.sha_tag }}"
+          docker pull "$image"
+          python3 ragmap_adapter/smoke/stub_llm.py 18765 &
+          python3 ragmap_adapter/smoke/make_input.py "$RUNNER_TEMP/input"
+          mkdir -p "$RUNNER_TEMP/output"
+          docker run --rm --network host \
+            -e RAGMAP_VLM_BASE_URL=http://127.0.0.1:18765 -e RAGMAP_VLM_MODEL=stub \
+            -v "$RUNNER_TEMP/input:/input:ro" -v "$RUNNER_TEMP/output:/output" \
+            "$image" --input /input --output /output LLM.temperature=0.0
+          cat "$RUNNER_TEMP/output/run.json"
+          python3 - "$RUNNER_TEMP/output" <<'PY'
+          import json, sys
+          out = sys.argv[1]
+          run = json.load(open(f"{out}/run.json"))
+          assert run["status"] == "ok", run
+          areas = [json.loads(line) for line in open(f"{out}/areas.jsonl")]
+          assert areas and all(a["label"] == "smoke_test_zone" for a in areas), areas
+          leaves = {c for a in areas for c in a["children"] if "/" in c}
+          assert len(leaves) == 12, leaves
+          print("smoke ok:", run["counts"]["levels"])
+          PY
+
+      - name: Upload smoke outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-output
+          path: ${{ runner.temp }}/output
+          if-no-files-found: warn

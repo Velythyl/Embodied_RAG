@@ -1,0 +1,7 @@
+.git
+.github
+**/__pycache__
+embodied_nav/Miniforge3.sh
+embodied_nav_cache
+semantic_graphs
+semantic_graph2.gml
